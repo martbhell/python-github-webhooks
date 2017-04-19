@@ -28,12 +28,19 @@ from os import access, X_OK, remove, fdopen
 from os.path import isfile, abspath, normpath, dirname, join, basename
 
 import requests
-from ipaddress import ip_address, ip_network
+import ipaddress
 from flask import Flask, request, abort
 
+# Settings
+debug = False
+use_proxy_ip = True
+###
 
 application = Flask(__name__)
 
+if debug:
+  f = open('/tmp/workfile', 'a')
+  f.write("#\n")
 
 @application.route('/', methods=['GET', 'POST'])
 def index():
@@ -55,15 +62,25 @@ def index():
 
     # Allow Github IPs only
     if config.get('github_ips_only', True):
-        src_ip = ip_address(
-            u'{}'.format(request.remote_addr)  # Fix stupid ipaddress issue
-        )
+	if use_proxy_ip:
+          src_ip = ipaddress.ip_address(
+              u'{}'.format(request.environ.get('HTTP_X_REAL_IP'))  # Use the IP talking to the NGINX - stupid proxy forwarding issue
+          )
+	else:
+          src_ip = ipaddress.ip_address(
+              u'{}'.format(request.remote_addr)  # Fix stupid ipaddress issue
+	  )
         whitelist = requests.get('https://api.github.com/meta').json()['hooks']
 
         for valid_ip in whitelist:
-            if src_ip in ip_network(valid_ip):
+            if src_ip in ipaddress.ip_network(valid_ip):
+                break
+	    # Sometimes it's an IPv4 mapped into an IPv6 (::ffff:abcd:abcd). 
+	    # To get the IPv4 we use ipv4_mapped
+	    if ipaddress.ip_address(src_ip).ipv4_mapped in ipaddress.ip_network(valid_ip):
                 break
         else:
+	    print "bad: %s" % src_ip
             abort(403)
 
     # Enforce secret
@@ -97,10 +114,16 @@ def index():
     if event == 'ping':
         return dumps({'msg': 'pong'})
 
+    if debug:
+      f.write("########\n")
+      f.write("event: %s\n" % event)
+
     # Gather data
     try:
         payload = loads(request.data)
+        if debug: f.write("data1: %s\n" % str(request.data))
     except:
+        if debug: f.write("data2: %s\n" % str(request.data))
         abort(400)
 
     # Determining the branch is tricky, as it only appears for certain event
@@ -149,6 +172,8 @@ def index():
     scripts.append(join(hooks, '{event}'.format(**meta)))
     scripts.append(join(hooks, 'all'))
 
+    if debug: f.write("scripts: %s" % scripts)
+
     # Check permissions
     scripts = [s for s in scripts if isfile(s) and access(s, X_OK)]
     if not scripts:
@@ -180,6 +205,7 @@ def index():
             logging.error('{} : {} \n{}'.format(
                 s, proc.returncode, stderr
             ))
+    if debug: f.write("ran: %s" % ran)
 
     # Remove temporal file
     remove(tmpfile)
@@ -190,8 +216,9 @@ def index():
 
     output = dumps(ran, sort_keys=True, indent=4)
     logging.info(output)
+    #f.close()
     return output
 
 
 if __name__ == '__main__':
-    application.run(debug=True, host='0.0.0.0')
+    application.run(debug=True, host='0.0.0.0', port=8089)
